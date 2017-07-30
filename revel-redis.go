@@ -2,17 +2,18 @@
 package revelRedis
 
 import (
-	"github.com/gosexy/redis"
 	"github.com/revel/revel"
+    "github.com/garyburd/redigo/redis"
 	"os"
 	"regexp"
 	"strings"
 	"strconv"
 	"fmt"
+	"time"
 )
 
 var (
-	Redis *redis.Client
+	redisPool                 *redis.Pool
 )
 
 func Init() {
@@ -68,35 +69,59 @@ func Init() {
 		}
 	}
 
-	Redis = redis.New()
+	redisPool = newRedisPool("tcp", fmt.Sprintf("%s:%d", host, port), password)
 
-	// Open a connection.
-	var err error
-	err = Redis.Connect(host, uint(port))
-	if err != nil {
-		revel.ERROR.Fatal(err)
-	}
-
-	// Attempt to authenticate
-	if len(password) != 0 {
-		m, err := Redis.Auth(password)
-		if err != nil {
-			revel.ERROR.Fatal(fmt.Sprintf("Could not authenticate redis: %s", m))
-		}
+	if redisPool == nil {
+		revel.ERROR.Fatal("RedisPool == nil")
 	}
 }
 
 type RedisController struct {
 	*revel.Controller
-	Redis *redis.Client
+	RedisPool         *redis.Pool
 }
 
 func (c *RedisController) Begin() revel.Result {
-	c.Redis = Redis
+	c.RedisPool = redisPool
 	return nil
 }
 
 func init() {
 	revel.OnAppStart(Init)
 	revel.InterceptMethod((*RedisController).Begin, revel.BEFORE)
+}
+
+func (this *RedisController) DoRedis(commandName string, args ...interface{}) (reply interface{}, err error) {
+	client := this.RedisPool.Get()
+	defer client.Close()
+	reply, err = client.Do(commandName, args...)
+	return
+}
+
+
+func newRedisPool(protocol, server, password string) *redis.Pool {
+	return &redis.Pool{
+		MaxIdle:     3,
+		IdleTimeout: 240 * time.Second,
+		Dial: func() (redis.Conn, error) {
+			c, err := redis.Dial(protocol, server)
+			if err != nil {
+				return nil, err
+			}
+			if password != "" {
+				if _, err := c.Do("AUTH", password); err != nil {
+					c.Close()
+					return nil, err
+				}
+			}
+			return c, err
+		},
+		TestOnBorrow: func(c redis.Conn, t time.Time) (err error) {
+			if time.Since(t) < 5*time.Second {
+				return nil
+			}
+			_, err = c.Do("PING")
+			return
+		},
+	}
 }
